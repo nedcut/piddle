@@ -33,9 +33,44 @@ from collections import Counter
 EPS = 1e-12
 
 
+def _normalize_dice(dice):
+    """Validate and return dice as a sorted tuple."""
+    try:
+        normalized = tuple(sorted(dice))
+    except TypeError as exc:
+        raise ValueError("dice must be an iterable of six integers from 1 to 6") from exc
+
+    if len(normalized) != 6:
+        raise ValueError("dice must contain exactly six values")
+    if any(type(d) is not int or d < 1 or d > 6 for d in normalized):
+        raise ValueError("dice values must be integers from 1 to 6")
+    return normalized
+
+
+def _normalize_rolls_left(rolls_left):
+    if type(rolls_left) is not int or rolls_left < 0 or rolls_left > 2:
+        raise ValueError("rolls_left must be 0, 1, or 2")
+    return rolls_left
+
+
+def _normalize_target(target):
+    try:
+        normalized = tuple(target)
+    except TypeError as exc:
+        raise ValueError("target must be a (count, value) pair") from exc
+
+    if len(normalized) != 2:
+        raise ValueError("target must be a (count, value) pair")
+    count, value_ = normalized
+    if type(count) is not int or count < 2 or count > 6:
+        raise ValueError("target count must be an integer from 2 to 6")
+    if type(value_) is not int or value_ < 2 or value_ > 6:
+        raise ValueError("target value must be an integer from 2 to 6")
+    return normalized
+
+
 # ----------------------------- hand evaluation -----------------------------
-def eval_hand(dice):
-    """Return (count, value) of the best single group, treating 1s as wild."""
+def _eval_hand_unchecked(dice):
     wilds = sum(1 for d in dice if d == 1)
     counts = Counter(d for d in dice if d != 1)
     best = (-1, -1)
@@ -45,6 +80,11 @@ def eval_hand(dice):
         if cand > best:           # tuple compare: count first, then value
             best = cand
     return best                   # always (count>=2) for 6 dice; see note below
+
+
+def eval_hand(dice):
+    """Return (count, value) of the best single group, treating 1s as wild."""
+    return _eval_hand_unchecked(_normalize_dice(dice))
 
 
 COUNT_WORD = {2: "pair of", 3: "three", 4: "four", 5: "five", 6: "six"}
@@ -60,14 +100,18 @@ def hand_name(hand):
 
 
 # --------------------------- outcome vs a target ---------------------------
-def outcome(dice, target):
-    """(pwin, ptie) for a *final* hand vs target. Loss is implied = 1-pwin-ptie."""
-    h = eval_hand(dice)
+def _outcome_unchecked(dice, target):
+    h = _eval_hand_unchecked(dice)
     if h > target:
         return (1.0, 0.0)
     if h == target:
         return (0.0, 1.0)
     return (0.0, 0.0)
+
+
+def outcome(dice, target):
+    """(pwin, ptie) for a *final* hand vs target. Loss is implied = 1-pwin-ptie."""
+    return _outcome_unchecked(_normalize_dice(dice), _normalize_target(target))
 
 
 def better(a, b):
@@ -111,10 +155,9 @@ def keep_sets(dice):
 
 # --------------------------------- the DP ----------------------------------
 @lru_cache(maxsize=None)
-def value(dice, rolls_left, target):
+def _value(dice, rolls_left, target):
     """Optimal (pwin, ptie) from state (dice, rolls_left) against target."""
-    dice = tuple(sorted(dice))
-    stop_val = outcome(dice, target)
+    stop_val = _outcome_unchecked(dice, target)
     if rolls_left == 0:
         return stop_val
 
@@ -125,12 +168,20 @@ def value(dice, rolls_left, target):
             continue                      # keeping all == stopping; already covered
         pwin = ptie = 0.0
         for faces, p in _REROLL_CACHE[k]:
-            child = value(tuple(sorted(kept + faces)), rolls_left - 1, target)
+            child = _value(tuple(sorted(kept + faces)), rolls_left - 1, target)
             pwin += p * child[0]
             ptie += p * child[1]
         if better((pwin, ptie), best):
             best = (pwin, ptie)
     return best
+
+
+def value(dice, rolls_left, target):
+    """Optimal (pwin, ptie) from state (dice, rolls_left) against target."""
+    dice = _normalize_dice(dice)
+    rolls_left = _normalize_rolls_left(rolls_left)
+    target = _normalize_target(target)
+    return _value(dice, rolls_left, target)
 
 
 def best_move(dice, rolls_left, target):
@@ -139,7 +190,9 @@ def best_move(dice, rolls_left, target):
     Returns a dict: keep (tuple of kept faces), action ('stop'|'reroll'),
     pwin/ptie/plose, and the current hand if you stopped now.
     """
-    dice = tuple(sorted(dice))
+    dice = _normalize_dice(dice)
+    rolls_left = _normalize_rolls_left(rolls_left)
+    target = _normalize_target(target)
     stop_val = outcome(dice, target)
     best = {"action": "stop", "keep": dice, "val": stop_val}
 
@@ -150,7 +203,7 @@ def best_move(dice, rolls_left, target):
                 continue
             pwin = ptie = 0.0
             for faces, p in _REROLL_CACHE[k]:
-                child = value(tuple(sorted(kept + faces)), rolls_left - 1, target)
+                child = _value(tuple(sorted(kept + faces)), rolls_left - 1, target)
                 pwin += p * child[0]
                 ptie += p * child[1]
             if better((pwin, ptie), best["val"]):
@@ -164,7 +217,7 @@ def best_move(dice, rolls_left, target):
         "pwin": pwin,
         "ptie": ptie,
         "plose": max(0.0, 1.0 - pwin - ptie),
-        "hand_now": eval_hand(dice),
+        "hand_now": _eval_hand_unchecked(dice),
     }
 
 

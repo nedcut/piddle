@@ -8,6 +8,8 @@ venv/
 node_modules/
 dist/
 build/
+# Browser verification
+.playwright-mcp/
 # OS / editor
 .DS_Store
 .vscode/

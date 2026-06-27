@@ -2,9 +2,32 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from piddle_solver import eval_hand, best_move, value, better
+
+
+def test_public_api_accepts_lists():
+    assert eval_hand([1, 1, 5, 5, 5, 6]) == (5, 5)
+
+    m = best_move([6, 6, 6, 2, 3, 1], 2, [5, 5])
+    assert tuple(m["keep"]) == (1, 6, 6, 6)
+
+
+def test_public_api_rejects_invalid_states():
+    with pytest.raises(ValueError, match="six values"):
+        best_move((1, 2, 3, 4, 5), 2, (4, 4))
+
+    with pytest.raises(ValueError, match="integers from 1 to 6"):
+        best_move((1, 2, 3, 4, 5, 7), 2, (4, 4))
+
+    with pytest.raises(ValueError, match="0, 1, or 2"):
+        best_move((1, 2, 3, 4, 5, 6), 3, (4, 4))
+
+    with pytest.raises(ValueError, match="target count"):
+        best_move((1, 2, 3, 4, 5, 6), 2, (1, 6))
 
 
 def test_eval_wilds():

@@ -68,8 +68,22 @@ best_move(dice=(6, 6, 6, 2, 3, 1), rolls_left=2, target=(5, 5))
 ```
 
 **Web advisor:** `web/PiddleAdvisor.jsx` is a self-contained React component with
-the same solver ported to JS (verified to match the Python to 3 decimals). Drop
-it into any React app, or run it as-is.
+the same solver ported to JS (verified to match the Python to 3 decimals). This
+repo also includes a Bun/Vite app shell so you can run and deploy it directly.
+
+```bash
+bun install
+bun run dev
+```
+
+Then open the local URL printed by Vite, usually `http://localhost:5173`.
+
+For a production build:
+
+```bash
+bun run build
+bun run preview
+```
 
 **Tests:**
 
