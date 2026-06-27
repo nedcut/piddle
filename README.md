@@ -88,8 +88,12 @@ bun run preview
 **Tests:**
 
 ```bash
-pip install pytest && pytest solver/tests
+pip install pytest
+bun run test
 ```
+
+The test suite checks the Python solver and verifies that the browser solver
+matches the Python reference on a deterministic parity set.
 
 ## License
 

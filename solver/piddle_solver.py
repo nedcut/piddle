@@ -123,6 +123,23 @@ def better(a, b):
     return a[1] > b[1] + EPS
 
 
+def _compare_keeps(a, b):
+    """Tie-break optimal moves: keep more dice, then higher sorted dice."""
+    if len(a) != len(b):
+        return len(a) - len(b)
+    return (a > b) - (a < b)
+
+
+def _preferred_action(candidate, best):
+    if better(candidate["val"], best["val"]):
+        return True
+    if better(best["val"], candidate["val"]):
+        return False
+    if candidate["action"] != best["action"]:
+        return candidate["action"] == "stop"
+    return _compare_keeps(candidate["keep"], best["keep"]) > 0
+
+
 # ----------------------- reroll outcome distribution -----------------------
 def reroll_dists(k):
     """All size-k multisets of faces 1..6 with their probabilities.
@@ -206,8 +223,9 @@ def best_move(dice, rolls_left, target):
                 child = _value(tuple(sorted(kept + faces)), rolls_left - 1, target)
                 pwin += p * child[0]
                 ptie += p * child[1]
-            if better((pwin, ptie), best["val"]):
-                best = {"action": "reroll", "keep": kept, "val": (pwin, ptie)}
+            candidate = {"action": "reroll", "keep": kept, "val": (pwin, ptie)}
+            if _preferred_action(candidate, best):
+                best = candidate
 
     pwin, ptie = best["val"]
     return {

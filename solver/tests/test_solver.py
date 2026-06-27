@@ -60,3 +60,10 @@ def test_known_probabilities():
     m = best_move((6, 6, 6, 2, 3, 1), 2, (5, 5))
     assert abs(m["pwin"] - 0.802) < 1e-3
     assert tuple(m["keep"]) == (1, 6, 6, 6)
+
+
+def test_tied_moves_use_stable_human_tiebreak():
+    m = best_move((2, 2, 2, 2, 6, 6), 1, (5, 4))
+    assert m["action"] == "reroll"
+    assert m["keep"] == (2, 2, 2, 2)
+    assert m["pwin"] == pytest.approx(1 / 9)

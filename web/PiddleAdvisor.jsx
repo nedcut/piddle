@@ -1,4 +1,5 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useMemo, useState } from "react";
+import { EPS, bestMove, handName } from "../src/piddleSolver.js";
 
 /* ===========================================================================
    PIDDLE ADVISOR — live optimal-move helper (rung 1: vs a known target)
@@ -17,99 +18,7 @@ const PIPS = {
   1: [4], 2: [0, 8], 3: [0, 4, 8], 4: [0, 2, 6, 8],
   5: [0, 2, 4, 6, 8], 6: [0, 2, 3, 5, 6, 8],
 };
-const COUNT_WORD = { 2: "pair of", 3: "three", 4: "four", 5: "five", 6: "six" };
 const COUNT_LABEL = { 2: "Pair", 3: "Three", 4: "Four", 5: "Five", 6: "Six" };
-
-/* ------------------------------- solver core ------------------------------ */
-const EPS = 1e-12;
-const FACT = [1, 1, 2, 6, 24, 120, 720];
-
-function evalHand(dice) {
-  let wilds = 0; const counts = {};
-  for (const d of dice) { if (d === 1) wilds++; else counts[d] = (counts[d] || 0) + 1; }
-  let best = [-1, -1];
-  for (let v = 2; v <= 6; v++) {
-    const c = (counts[v] || 0) + wilds;
-    if (c > best[0] || (c === best[0] && v > best[1])) best = [c, v];
-  }
-  return best;
-}
-const cmpHand = (a, b) => (a[0] !== b[0] ? a[0] - b[0] : a[1] - b[1]);
-function outcome(dice, target) {
-  const c = cmpHand(evalHand(dice), target);
-  return c > 0 ? [1, 0] : c === 0 ? [0, 1] : [0, 0];
-}
-const better = (a, b) =>
-  a[0] > b[0] + EPS ? true : a[0] < b[0] - EPS ? false : a[1] > b[1] + EPS;
-
-function cwr(k) {
-  const res = []; const rec = (s, cur) => {
-    if (cur.length === k) { res.push(cur.slice()); return; }
-    for (let v = s; v <= 6; v++) { cur.push(v); rec(v, cur); cur.pop(); }
-  }; rec(1, []); return res;
-}
-const REROLL = {};
-for (let k = 0; k <= 6; k++) {
-  const denom = Math.pow(6, k);
-  REROLL[k] = cwr(k).map((combo) => {
-    const c = {}; for (const x of combo) c[x] = (c[x] || 0) + 1;
-    let ways = FACT[k]; for (const key in c) ways /= FACT[c[key]];
-    return [combo, ways / denom];
-  });
-}
-function keepSets(dice) {
-  const sorted = dice.slice().sort((a, b) => a - b);
-  const seen = new Set(), out = [];
-  const rec = (s, cur) => {
-    const key = cur.join(",");
-    if (!seen.has(key)) { seen.add(key); out.push(cur.slice()); }
-    for (let i = s; i < sorted.length; i++) { cur.push(sorted[i]); rec(i + 1, cur); cur.pop(); }
-  };
-  rec(0, []); return out;
-}
-const MEMO = new Map();
-function value(dice, rollsLeft, target) {
-  const sorted = dice.slice().sort((a, b) => a - b);
-  const key = sorted.join("") + "|" + rollsLeft + "|" + target[0] + target[1];
-  if (MEMO.has(key)) return MEMO.get(key);
-  let best = outcome(sorted, target);
-  if (rollsLeft > 0) {
-    for (const kept of keepSets(sorted)) {
-      const k = 6 - kept.length; if (k === 0) continue;
-      let pw = 0, pt = 0;
-      for (const [faces, p] of REROLL[k]) {
-        const child = value(kept.concat(faces), rollsLeft - 1, target);
-        pw += p * child[0]; pt += p * child[1];
-      }
-      if (better([pw, pt], best)) best = [pw, pt];
-    }
-  }
-  MEMO.set(key, best); return best;
-}
-function bestMove(dice, rollsLeft, target) {
-  const sorted = dice.slice().sort((a, b) => a - b);
-  let best = { action: "stop", keep: sorted, val: outcome(sorted, target) };
-  if (rollsLeft > 0) {
-    for (const kept of keepSets(sorted)) {
-      const k = 6 - kept.length; if (k === 0) continue;
-      let pw = 0, pt = 0;
-      for (const [faces, p] of REROLL[k]) {
-        const child = value(kept.concat(faces), rollsLeft - 1, target);
-        pw += p * child[0]; pt += p * child[1];
-      }
-      if (better([pw, pt], best.val)) best = { action: "reroll", keep: kept, val: [pw, pt] };
-    }
-  }
-  const [pw, pt] = best.val;
-  return { keep: best.keep, action: best.action, pwin: pw, ptie: pt,
-    plose: Math.max(0, 1 - pw - pt), handNow: evalHand(sorted) };
-}
-function handName(h) {
-  const [c, v] = h;
-  if (c >= 6) return `six ${v}s`;
-  if (c === 2) return `pair of ${v}s`;
-  return `${COUNT_WORD[c]} ${v}s`;
-}
 
 /* --------------------------------- Die UI --------------------------------- */
 function Die({ value: v, wild, hold, faded, onClick, small, label }) {
