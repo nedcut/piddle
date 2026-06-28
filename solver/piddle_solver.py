@@ -69,6 +69,12 @@ def _normalize_target(target):
     return normalized
 
 
+def _normalize_players_after(players_after):
+    if type(players_after) is not int or players_after < 0:
+        raise ValueError("players_after must be a non-negative integer")
+    return players_after
+
+
 # ----------------------------- hand evaluation -----------------------------
 def _eval_hand_unchecked(dice):
     wilds = sum(1 for d in dice if d == 1)
@@ -201,6 +207,102 @@ def value(dice, rolls_left, target):
     return _value(dice, rolls_left, target)
 
 
+# ---------------------- table-pressure / future players ---------------------
+def _add_scaled_dist(acc, dist, p):
+    return (
+        acc[0] + p * dist[0],
+        acc[1] + p * dist[1],
+        acc[2] + p * dist[2],
+    )
+
+
+@lru_cache(maxsize=None)
+def _future_challenger_dist(target, rolls_left, players_after):
+    """Distribution of future challengers vs target: (beat, tie, miss).
+
+    This excludes the already-existing target hand. It answers: among the
+    players still to act, will anyone beat the target, tie it, or all miss it?
+    """
+    if players_after <= 0:
+        return (0.0, 0.0, 1.0)
+
+    dist = (0.0, 0.0, 0.0)
+    for dice, p in _REROLL_CACHE[6]:
+        child = _table_state(tuple(sorted(dice)), rolls_left, target, players_after - 1)
+        dist = _add_scaled_dist(dist, child[4:], p)
+    return dist
+
+
+def _stop_table_result(hand, target, rolls_left, players_after):
+    relation = (hand > target) - (hand < target)
+
+    if relation > 0:
+        future = _future_challenger_dist(hand, rolls_left, players_after)
+        # We already beat the old target. Later players can only turn that
+        # into our win, a push, or our loss relative to our new leading hand.
+        return (future[2], future[1]), (1.0, 0.0, 0.0)
+
+    if relation == 0:
+        future = _future_challenger_dist(target, rolls_left, players_after)
+        not_beaten = future[1] + future[2]
+        return (0.0, not_beaten), (future[0], not_beaten, 0.0)
+
+    return (0.0, 0.0), _future_challenger_dist(target, rolls_left, players_after)
+
+
+@lru_cache(maxsize=None)
+def _table_state(dice, rolls_left, target, players_after):
+    """Optimal state when later players may still challenge after you.
+
+    Returns (action, keep, pwin, ptie, p_future_beat, p_future_tie, p_future_miss).
+    The future distribution is relative to the incoming target and includes the
+    current player's chosen policy plus all later challengers.
+    """
+    stop_val, stop_table = _stop_table_result(
+        _eval_hand_unchecked(dice), target, rolls_left, players_after
+    )
+    best = {
+        "action": "stop",
+        "keep": dice,
+        "val": stop_val,
+        "table": stop_table,
+    }
+
+    if rolls_left > 0:
+        for kept in keep_sets(dice):
+            k = 6 - len(kept)
+            if k == 0:
+                continue
+            pwin = ptie = 0.0
+            table = (0.0, 0.0, 0.0)
+            for faces, p in _REROLL_CACHE[k]:
+                child = _table_state(tuple(sorted(kept + faces)), rolls_left - 1, target, players_after)
+                pwin += p * child[2]
+                ptie += p * child[3]
+                table = _add_scaled_dist(table, child[4:], p)
+            candidate = {"action": "reroll", "keep": kept, "val": (pwin, ptie), "table": table}
+            if _preferred_action(candidate, best):
+                best = candidate
+
+    return (
+        best["action"],
+        best["keep"],
+        best["val"][0],
+        best["val"][1],
+        best["table"][0],
+        best["table"][1],
+        best["table"][2],
+    )
+
+
+def future_challenger_distribution(target, rolls_left, players_after):
+    """Return (pbeat, ptie, pmiss) for players still to act against target."""
+    target = _normalize_target(target)
+    rolls_left = _normalize_rolls_left(rolls_left)
+    players_after = _normalize_players_after(players_after)
+    return _future_challenger_dist(target, rolls_left, players_after)
+
+
 def best_move(dice, rolls_left, target):
     """Recommend the optimal action and report (pwin, ptie, plose).
 
@@ -236,6 +338,38 @@ def best_move(dice, rolls_left, target):
         "ptie": ptie,
         "plose": max(0.0, 1.0 - pwin - ptie),
         "hand_now": _eval_hand_unchecked(dice),
+    }
+
+
+def best_move_with_table(dice, rolls_left, target, players_after=0):
+    """Recommend the best move while accounting for later challengers.
+
+    `players_after` is the number of players who will still act after you. Each
+    future player starts from a fresh 6-die roll, gets the same roll cap, and
+    chooses optimally for their own win/push/lose outcome.
+    """
+    dice = _normalize_dice(dice)
+    rolls_left = _normalize_rolls_left(rolls_left)
+    target = _normalize_target(target)
+    players_after = _normalize_players_after(players_after)
+
+    action, keep, pwin, ptie, pbeat, table_tie, table_miss = _table_state(
+        dice, rolls_left, target, players_after
+    )
+    return {
+        "keep": keep,
+        "reroll_count": 6 - len(keep),
+        "action": action,
+        "pwin": pwin,
+        "ptie": ptie,
+        "plose": max(0.0, 1.0 - pwin - ptie),
+        "hand_now": _eval_hand_unchecked(dice),
+        "players_after": players_after,
+        "table": {
+            "pbeat": pbeat,
+            "ptie": table_tie,
+            "pmiss": table_miss,
+        },
     }
 
 

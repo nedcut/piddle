@@ -13,7 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "solver"))
 
-from piddle_solver import best_move
+from piddle_solver import best_move, best_move_with_table
 
 
 def _expected_case(dice, rolls_left, target):
@@ -28,6 +28,27 @@ def _expected_case(dice, rolls_left, target):
         "ptie": move["ptie"],
         "plose": move["plose"],
         "handNow": list(move["hand_now"]),
+    }
+
+
+def _expected_table_case(dice, rolls_left, target, players_after):
+    move = best_move_with_table(dice, rolls_left, target, players_after)
+    return {
+        "dice": list(dice),
+        "rollsLeft": rolls_left,
+        "target": list(target),
+        "playersAfter": players_after,
+        "keep": list(move["keep"]),
+        "action": move["action"],
+        "pwin": move["pwin"],
+        "ptie": move["ptie"],
+        "plose": move["plose"],
+        "handNow": list(move["hand_now"]),
+        "table": {
+            "pBeat": move["table"]["pbeat"],
+            "pTie": move["table"]["ptie"],
+            "pMiss": move["table"]["pmiss"],
+        },
     }
 
 
@@ -89,6 +110,77 @@ def test_js_solver_matches_python_reference(tmp_path):
 
     env = os.environ.copy()
     env["PIDDLE_PARITY_CASES"] = str(case_file)
+    result = subprocess.run(
+        [bun, "--eval", script],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_js_table_solver_matches_python_reference(tmp_path):
+    bun = shutil.which("bun")
+    if bun is None:
+        pytest.skip("bun is required for JS solver parity")
+
+    table_cases = [
+        ((6, 6, 6, 2, 3, 1), 2, (5, 5)),
+        ((6, 6, 6, 6, 2, 3), 1, (4, 5)),
+        ((1, 6, 6, 2, 3, 4), 2, (6, 6)),
+        ((2, 2, 2, 2, 6, 6), 1, (5, 4)),
+    ]
+    cases = [
+        _expected_table_case(dice, rolls_left, target, players_after)
+        for dice, rolls_left, target in table_cases
+        for players_after in range(3)
+    ]
+    case_file = tmp_path / "table_parity_cases.json"
+    case_file.write_text(json.dumps(cases))
+
+    script = textwrap.dedent(
+        """
+        import { bestMoveWithTable } from "./src/piddleSolver.js";
+
+        const cases = await Bun.file(Bun.env.PIDDLE_TABLE_PARITY_CASES).json();
+        const tolerance = 1e-10;
+
+        for (const expected of cases) {
+          const actual = bestMoveWithTable(
+            expected.dice,
+            expected.rollsLeft,
+            expected.target,
+            expected.playersAfter,
+          );
+
+          for (const field of ["pwin", "ptie", "plose"]) {
+            const delta = Math.abs(actual[field] - expected[field]);
+            if (delta > tolerance) {
+              throw new Error(`${field} mismatch: expected ${JSON.stringify(expected)}, actual ${JSON.stringify(actual)}`);
+            }
+          }
+
+          for (const field of ["pBeat", "pTie", "pMiss"]) {
+            const delta = Math.abs(actual.table[field] - expected.table[field]);
+            if (delta > tolerance) {
+              throw new Error(`table.${field} mismatch: expected ${JSON.stringify(expected)}, actual ${JSON.stringify(actual)}`);
+            }
+          }
+
+          for (const field of ["action", "keep", "handNow", "playersAfter"]) {
+            if (JSON.stringify(actual[field]) !== JSON.stringify(expected[field])) {
+              throw new Error(`${field} mismatch: expected ${JSON.stringify(expected)}, actual ${JSON.stringify(actual)}`);
+            }
+          }
+        }
+        """
+    )
+
+    env = os.environ.copy()
+    env["PIDDLE_TABLE_PARITY_CASES"] = str(case_file)
     result = subprocess.run(
         [bun, "--eval", script],
         cwd=ROOT,

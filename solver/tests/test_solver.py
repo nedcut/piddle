@@ -6,7 +6,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from piddle_solver import eval_hand, best_move, value, better
+from piddle_solver import (
+    best_move,
+    best_move_with_table,
+    better,
+    eval_hand,
+    future_challenger_distribution,
+    value,
+)
 
 
 def test_public_api_accepts_lists():
@@ -67,3 +74,36 @@ def test_tied_moves_use_stable_human_tiebreak():
     assert m["action"] == "reroll"
     assert m["keep"] == (2, 2, 2, 2)
     assert m["pwin"] == pytest.approx(1 / 9)
+
+
+def test_table_mode_matches_known_target_when_no_players_remain():
+    dice = (6, 6, 6, 2, 3, 1)
+    target = (5, 5)
+    last_player = best_move(dice, 2, target)
+    table_aware = best_move_with_table(dice, 2, target, players_after=0)
+
+    assert table_aware["action"] == last_player["action"]
+    assert table_aware["keep"] == last_player["keep"]
+    assert table_aware["pwin"] == pytest.approx(last_player["pwin"])
+    assert table_aware["ptie"] == pytest.approx(last_player["ptie"])
+    assert table_aware["plose"] == pytest.approx(last_player["plose"])
+
+
+def test_table_mode_improves_a_winning_hand_when_future_players_can_challenge():
+    last_player = best_move((6, 6, 6, 6, 2, 3), 1, (4, 5))
+    table_aware = best_move_with_table((6, 6, 6, 6, 2, 3), 1, (4, 5), players_after=1)
+
+    assert last_player["action"] == "stop"
+    assert table_aware["action"] == "reroll"
+    assert table_aware["keep"] == (6, 6, 6, 6)
+    assert table_aware["pwin"] < 1
+    assert table_aware["ptie"] > 0
+
+
+def test_future_challenger_distribution_is_normalized_and_pressure_grows():
+    one_player = future_challenger_distribution((5, 5), 2, 1)
+    three_players = future_challenger_distribution((5, 5), 2, 3)
+
+    assert sum(one_player) == pytest.approx(1)
+    assert sum(three_players) == pytest.approx(1)
+    assert three_players[0] > one_player[0]

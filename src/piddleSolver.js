@@ -30,6 +30,10 @@ function cmpHand(a, b) {
   return a[0] !== b[0] ? a[0] - b[0] : a[1] - b[1];
 }
 
+export function compareHands(a, b) {
+  return cmpHand(a, b);
+}
+
 function outcome(dice, target) {
   const c = cmpHand(evalHand(dice), target);
   return c > 0 ? [1, 0] : c === 0 ? [0, 1] : [0, 0];
@@ -106,6 +110,45 @@ function preferredAction(candidate, best) {
 }
 
 const MEMO = new Map();
+const TABLE_MEMO = new Map();
+const FUTURE_MEMO = new Map();
+
+function emptyFuture() {
+  return { pBeat: 0, pTie: 0, pMiss: 1 };
+}
+
+function addScaledTable(sum, dist, p) {
+  sum.pBeat += p * dist.pBeat;
+  sum.pTie += p * dist.pTie;
+  sum.pMiss += p * dist.pMiss;
+}
+
+function stopTableResult(dice, target, rollsLeft, playersAfter) {
+  const hand = evalHand(dice);
+  const rel = cmpHand(hand, target);
+
+  if (rel > 0) {
+    const future = futureChallengerDistribution(hand, rollsLeft, playersAfter);
+    return {
+      val: [future.pMiss, future.pTie],
+      table: { pBeat: 1, pTie: 0, pMiss: 0 },
+    };
+  }
+
+  if (rel === 0) {
+    const future = futureChallengerDistribution(target, rollsLeft, playersAfter);
+    const notBeaten = future.pTie + future.pMiss;
+    return {
+      val: [0, notBeaten],
+      table: { pBeat: future.pBeat, pTie: notBeaten, pMiss: 0 },
+    };
+  }
+
+  return {
+    val: [0, 0],
+    table: futureChallengerDistribution(target, rollsLeft, playersAfter),
+  };
+}
 
 export function value(dice, rollsLeft, target) {
   const sorted = dice.slice().sort((a, b) => a - b);
@@ -130,6 +173,57 @@ export function value(dice, rollsLeft, target) {
 
   MEMO.set(key, best);
   return best;
+}
+
+function tableState(dice, rollsLeft, target, playersAfter) {
+  const sorted = dice.slice().sort((a, b) => a - b);
+  const key = `${sorted.join("")}|${rollsLeft}|${target[0]}${target[1]}|${playersAfter}`;
+  if (TABLE_MEMO.has(key)) return TABLE_MEMO.get(key);
+
+  const stop = stopTableResult(sorted, target, rollsLeft, playersAfter);
+  let best = {
+    action: "stop",
+    keep: sorted,
+    val: stop.val,
+    table: stop.table,
+  };
+
+  if (rollsLeft > 0) {
+    for (const kept of keepSets(sorted)) {
+      const k = 6 - kept.length;
+      if (k === 0) continue;
+      let pwin = 0;
+      let ptie = 0;
+      const table = { pBeat: 0, pTie: 0, pMiss: 0 };
+      for (const [faces, p] of REROLL[k]) {
+        const child = tableState(kept.concat(faces), rollsLeft - 1, target, playersAfter);
+        pwin += p * child.val[0];
+        ptie += p * child.val[1];
+        addScaledTable(table, child.table, p);
+      }
+      const candidate = { action: "reroll", keep: kept, val: [pwin, ptie], table };
+      if (preferredAction(candidate, best)) best = candidate;
+    }
+  }
+
+  TABLE_MEMO.set(key, best);
+  return best;
+}
+
+export function futureChallengerDistribution(target, rollsLeft, playersAfter) {
+  if (playersAfter <= 0) return emptyFuture();
+
+  const key = `${target[0]}${target[1]}|${rollsLeft}|${playersAfter}`;
+  if (FUTURE_MEMO.has(key)) return FUTURE_MEMO.get(key);
+
+  const table = { pBeat: 0, pTie: 0, pMiss: 0 };
+  for (const [dice, p] of REROLL[6]) {
+    const child = tableState(dice, rollsLeft, target, playersAfter - 1);
+    addScaledTable(table, child.table, p);
+  }
+
+  FUTURE_MEMO.set(key, table);
+  return table;
 }
 
 export function bestMove(dice, rollsLeft, target) {
@@ -160,6 +254,23 @@ export function bestMove(dice, rollsLeft, target) {
     ptie: pt,
     plose: Math.max(0, 1 - pw - pt),
     handNow: evalHand(sorted),
+  };
+}
+
+export function bestMoveWithTable(dice, rollsLeft, target, playersAfter = 0) {
+  const sorted = dice.slice().sort((a, b) => a - b);
+  const normalizedPlayersAfter = Math.max(0, Math.trunc(playersAfter));
+  const best = tableState(sorted, rollsLeft, target, normalizedPlayersAfter);
+  const [pw, pt] = best.val;
+  return {
+    keep: best.keep,
+    action: best.action,
+    pwin: pw,
+    ptie: pt,
+    plose: Math.max(0, 1 - pw - pt),
+    handNow: evalHand(sorted),
+    playersAfter: normalizedPlayersAfter,
+    table: best.table,
   };
 }
 

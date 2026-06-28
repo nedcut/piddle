@@ -46,10 +46,12 @@ value.
 ## Roadmap
 
 - **Rung 1 — optimal play vs a known target.** *(done — `solver/piddle_solver.py`)*
-  Exact for the last player to act; a mild over-estimate for earlier players.
-- **Rung 2 — account for players after you.** Replace the fixed target with the
-  distribution of the eventual best-of-the-rest, via backward induction over
-  turn order.
+  Exact for the last player to act.
+- **Rung 2 — account for players after you.** *(done — `best_move_with_table`)*
+  Replaces the fixed target with an exact challenger distribution via backward
+  induction over the players still to act. This can change the best move even
+  when you already beat the current hand, because improving your made hand can
+  reduce the chance that someone behind you catches or beats it.
 - **Rung 3 — full solve including the cap.** The first player picks the roll
   count K that maximizes their own equilibrium value.
 
@@ -67,9 +69,28 @@ best_move(dice=(6, 6, 6, 2, 3, 1), rolls_left=2, target=(5, 5))
 # -> keep (1, 6, 6, 6), reroll 2, win 0.802 / push 0.000 / lose 0.198
 ```
 
+```python
+from solver.piddle_solver import best_move_with_table
+best_move_with_table(
+    dice=(6, 6, 6, 6, 2, 3),
+    rolls_left=1,
+    target=(4, 5),
+    players_after=1,
+)
+# -> keep (6, 6, 6, 6), reroll 2
+#    You already beat four 5s, but rolling the junk dice improves your shield.
+```
+
 **Web advisor:** `web/PiddleAdvisor.jsx` is a self-contained React component with
-the same solver ported to JS (verified to match the Python to 3 decimals). This
+the same solver ported to JS. The table-aware solve runs in a Web Worker so the
+interface stays responsive while the exact future-player tree is computed. This
 repo also includes a Bun/Vite app shell so you can run and deploy it directly.
+
+The advisor also has local **Photo scan** support: choose or take a photo of six
+light dice on a darker table and the browser estimates the die values with a
+small canvas-based CV pipeline. High-confidence scans apply automatically; lower
+confidence scans show the detected dice so you can apply or retake. No image is
+uploaded anywhere.
 
 ```bash
 bun install
@@ -92,8 +113,10 @@ pip install pytest
 bun run test
 ```
 
-The test suite checks the Python solver and verifies that the browser solver
-matches the Python reference on a deterministic parity set.
+The test suite checks the Python solver, verifies that the browser solver
+matches the Python reference on deterministic parity sets for both the known
+target solver and the table-aware solver, and runs a deterministic synthetic
+dice-image test for the photo scanner.
 
 ## License
 
