@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { detectDiceFromFile } from "../src/diceVision.js";
-import { EPS, bestMove, bestMoveWithTable, handName } from "../src/piddleSolver.js";
+import { EPS, bestMove, bestMoveWithTable, evalHand, handName } from "../src/piddleSolver.js";
 
 const C = {
   felt: "#14362d",
@@ -31,14 +31,42 @@ const PIPS = {
 
 const COUNT_LABEL = { 2: "Pair", 3: "Three", 4: "Four", 5: "Five", 6: "Six" };
 const PLAYER_OPTIONS = [0, 1, 2, 3];
+const DIE_VALUES = [1, 2, 3, 4, 5, 6];
+const ROLL_SIZE = 6;
 
 const randDie = () => 1 + Math.floor(Math.random() * 6);
 const pct = (x) => `${Math.round(x * 1000) / 10}%`;
-const scanPct = (x) => `${Math.round(x * 100)}%`;
-const AUTO_APPLY_CONFIDENCE = 0.56;
+const SCAN_UNCERTAIN_CONFIDENCE = 0.68;
 
-function Die({ value, held, muted, onClick, small = false, label }) {
-  const filled = new Set(PIPS[value]);
+const emptyRoll = () => Array.from({ length: ROLL_SIZE }, () => null);
+const emptyUncertainty = () => Array.from({ length: ROLL_SIZE }, () => false);
+
+function isCompleteRoll(values) {
+  return values.length === ROLL_SIZE && values.every((value) => Number.isInteger(value));
+}
+
+function nextOpenSlot(values, current) {
+  for (let offset = 1; offset <= values.length; offset += 1) {
+    const index = (current + offset) % values.length;
+    if (!values[index]) return index;
+  }
+  return current;
+}
+
+function PipGrid({ value }) {
+  const filled = new Set(PIPS[value] || []);
+
+  return (
+    <span className="pipGrid" aria-hidden="true">
+      {Array.from({ length: 9 }).map((_, index) => (
+        <span key={index} className={filled.has(index) ? "pip isOn" : "pip"} />
+      ))}
+    </span>
+  );
+}
+
+function Die({ value, held, muted, selected, uncertain, onClick, small = false, label }) {
+  const empty = !value;
   const style = {
     "--die-size": small ? "34px" : "clamp(48px, 13.5vw, 58px)",
     "--pip-size": small ? "5px" : "clamp(6px, 1.8vw, 8px)",
@@ -47,18 +75,22 @@ function Die({ value, held, muted, onClick, small = false, label }) {
   return (
     <button
       type="button"
-      className={`die${held ? " isHeld" : ""}${muted ? " isMuted" : ""}${small ? " isSmall" : ""}`}
+      className={`die${held ? " isHeld" : ""}${muted ? " isMuted" : ""}${selected ? " isSelected" : ""}${uncertain ? " isUncertain" : ""}${empty ? " isEmpty" : ""}${small ? " isSmall" : ""}`}
       style={style}
       onClick={onClick}
       disabled={!onClick}
-      aria-label={label || `Die showing ${value}`}
+      aria-label={label || (value ? `Die showing ${value}` : "Empty die slot")}
     >
-      <span className="pipGrid" aria-hidden="true">
-        {Array.from({ length: 9 }).map((_, index) => (
-          <span key={index} className={filled.has(index) ? "pip isOn" : "pip"} />
-        ))}
-      </span>
+      {value ? <PipGrid value={value} /> : <span className="emptySlotMark" aria-hidden="true" />}
     </button>
+  );
+}
+
+function DieFace({ value }) {
+  return (
+    <span className="dieFace" aria-hidden="true">
+      <PipGrid value={value} />
+    </span>
   );
 }
 
@@ -137,14 +169,17 @@ function normalizeMoveForTable(move) {
 }
 
 export default function PiddleAdvisor() {
-  const [dice, setDice] = useState([6, 6, 6, 2, 3, 1]);
+  const [dice, setDice] = useState(() => [6, 6, 6, 2, 3, 1]);
+  const [draftDice, setDraftDice] = useState(() => [6, 6, 6, 2, 3, 1]);
+  const [activeSlot, setActiveSlot] = useState(0);
+  const [uncertainSlots, setUncertainSlots] = useState(emptyUncertainty);
   const [rollsLeft, setRollsLeft] = useState(2);
   const [tCount, setTCount] = useState(5);
   const [tValue, setTValue] = useState(5);
   const [playersAfter, setPlayersAfter] = useState(1);
   const [solverState, setSolverState] = useState({ key: "", status: "idle", move: null, error: "" });
   const [photo, setPhoto] = useState(null);
-  const [scanState, setScanState] = useState({ status: "idle", result: null, applied: false, error: "" });
+  const [scanState, setScanState] = useState({ status: "idle", result: null, error: "" });
   const workerRef = useRef(null);
   const photoUrlRef = useRef("");
   const scanIdRef = useRef(0);
@@ -228,14 +263,70 @@ export default function PiddleAdvisor() {
   const holdFlags = useMemo(() => heldFlagsFor(dice, move.keep), [dice, move.keep]);
   const canRollRecommendation = !solving && move.action !== "stop" && rollsLeft > 0;
   const modeLabel = playersAfter === 0 ? "Known target" : "Table aware";
+  const filledCount = draftDice.filter(Boolean).length;
+  const diceLeft = ROLL_SIZE - filledCount;
+  const draftComplete = isCompleteRoll(draftDice);
+  const draftDirty = draftDice.some((value, index) => value !== dice[index]);
+  const hasUncertainSlots = uncertainSlots.some(Boolean);
+  const draftHandLabel = draftComplete
+    ? handName(evalHand(draftDice))
+    : `${diceLeft} ${diceLeft === 1 ? "die" : "dice"} left`;
+  const doneLabel = draftComplete ? (draftDirty || hasUncertainSlots ? "Done" : "Saved") : draftHandLabel;
+  const topStatus = solving ? "Solving table" : draftDirty ? "Editing draft" : modeLabel;
+  const adviceBasisLabel = draftDirty ? "Saved roll" : modeLabel;
+  const scanTitle =
+    scanState.status === "analyzing"
+      ? "Reading dice..."
+      : scanState.status === "error"
+        ? "Scan failed"
+        : scanState.result?.complete
+          ? "Roll pad filled"
+          : scanState.result
+            ? scanState.result.message
+            : "Photo loaded";
+  const scanHint =
+    scanState.status === "error"
+      ? `Could not read that image: ${scanState.error}`
+      : scanState.result?.complete
+        ? "Check the highlighted slots, then save the roll."
+        : scanState.result
+          ? "Fill the open slots or retake the photo."
+          : "A straight-down, bright shot works best.";
 
-  const cycle = (index) => {
-    setDice((arr) => arr.map((v, j) => (j === index ? (v % 6) + 1 : v)));
+  const selectSlot = (index) => {
+    setActiveSlot(index);
   };
 
-  const newHand = () => {
-    setDice(Array.from({ length: 6 }, randDie));
-    setRollsLeft(2);
+  const fillSlot = (value) => {
+    const slot = activeSlot;
+    const next = draftDice.map((current, index) => (index === slot ? value : current));
+    setDraftDice(next);
+    setUncertainSlots((flags) => flags.map((flag, index) => (index === slot ? false : flag)));
+    setActiveSlot(nextOpenSlot(next, slot));
+  };
+
+  const clearPhoto = () => {
+    scanIdRef.current += 1;
+    if (photoUrlRef.current) URL.revokeObjectURL(photoUrlRef.current);
+    photoUrlRef.current = "";
+    setPhoto(null);
+    setScanState({ status: "idle", result: null, error: "" });
+  };
+
+  const clearDraftRoll = () => {
+    clearPhoto();
+    setDraftDice(emptyRoll());
+    setUncertainSlots(emptyUncertainty());
+    setActiveSlot(0);
+  };
+
+  const commitDraftRoll = () => {
+    if (!draftComplete) return;
+    const next = draftDice.slice();
+    setDice(next);
+    setDraftDice(next);
+    setUncertainSlots(emptyUncertainty());
+    setActiveSlot(0);
   };
 
   const applyRecommendation = () => {
@@ -243,20 +334,20 @@ export default function PiddleAdvisor() {
     const need = {};
     for (const d of move.keep) need[d] = (need[d] || 0) + 1;
 
-    setDice((arr) => arr.map((d) => {
+    const next = dice.map((d) => {
       if (need[d] > 0) {
         need[d] -= 1;
         return d;
       }
       return randDie();
-    }));
-    setRollsLeft((n) => Math.max(0, n - 1));
-  };
+    });
 
-  const applyScanResult = (result) => {
-    if (!result?.complete) return;
-    setDice(result.values);
-    setScanState((state) => ({ ...state, applied: true }));
+    setDice(next);
+    setDraftDice(next);
+    setUncertainSlots(emptyUncertainty());
+    setActiveSlot(0);
+    clearPhoto();
+    setRollsLeft((n) => Math.max(0, n - 1));
   };
 
   const handlePhoto = async (event) => {
@@ -268,32 +359,31 @@ export default function PiddleAdvisor() {
     setPhoto({ url, name: file.name });
     const scanId = scanIdRef.current + 1;
     scanIdRef.current = scanId;
-    setScanState({ status: "analyzing", result: null, applied: false, error: "" });
+    setScanState({ status: "analyzing", result: null, error: "" });
     event.target.value = "";
 
     try {
       const result = await detectDiceFromFile(file);
       if (scanIdRef.current !== scanId) return;
-      const shouldApply = result.complete && result.averageConfidence >= AUTO_APPLY_CONFIDENCE;
-      if (shouldApply) setDice(result.values);
-      setScanState({ status: "ready", result, applied: shouldApply, error: "" });
+      const nextDraft = emptyRoll();
+      const nextUncertain = emptyUncertainty();
+      result.dice.slice(0, ROLL_SIZE).forEach((die, index) => {
+        nextDraft[index] = die.value;
+        nextUncertain[index] = die.confidence < SCAN_UNCERTAIN_CONFIDENCE;
+      });
+      const firstFix = nextDraft.findIndex((value, index) => !value || nextUncertain[index]);
+      setDraftDice(nextDraft);
+      setUncertainSlots(nextUncertain);
+      setActiveSlot(firstFix === -1 ? ROLL_SIZE - 1 : firstFix);
+      setScanState({ status: "ready", result, error: "" });
     } catch (error) {
       if (scanIdRef.current !== scanId) return;
       setScanState({
         status: "error",
         result: null,
-        applied: false,
         error: error instanceof Error ? error.message : String(error),
       });
     }
-  };
-
-  const clearPhoto = () => {
-    scanIdRef.current += 1;
-    if (photoUrlRef.current) URL.revokeObjectURL(photoUrlRef.current);
-    photoUrlRef.current = "";
-    setPhoto(null);
-    setScanState({ status: "idle", result: null, applied: false, error: "" });
   };
 
   return (
@@ -305,15 +395,15 @@ export default function PiddleAdvisor() {
           <span className="brandMark" aria-hidden="true">P</span>
           <div>
             <h1>Piddle Advisor</h1>
-            <span className={solving ? "solveStatus isBusy" : "solveStatus"}>
-              {solving ? "Solving table" : modeLabel}
+            <span className={`solveStatus${solving ? " isBusy" : ""}${draftDirty ? " isDraft" : ""}`}>
+              {topStatus}
             </span>
           </div>
         </div>
         <label className="scanButton">
           <input type="file" accept="image/*" capture="environment" onChange={handlePhoto} />
           <span className="scanGlyph" aria-hidden="true" />
-          Photo scan
+          Scan dice
         </label>
       </header>
 
@@ -324,44 +414,11 @@ export default function PiddleAdvisor() {
           </div>
           <div className="scanReadout">
             <div className="scanTopline">
-              <strong>
-                {scanState.status === "analyzing"
-                  ? "Reading dice..."
-                  : scanState.status === "error"
-                    ? "Scan failed"
-                    : scanState.result?.message || "Photo loaded"}
-              </strong>
+              <strong>{scanTitle}</strong>
               <button type="button" onClick={clearPhoto}>Clear</button>
             </div>
 
-            {scanState.result && (
-              <>
-                <div className="scanDice" aria-label="Detected dice">
-                  {scanState.result.dice.map((die, index) => (
-                    <span key={`${die.value}-${index}`}>
-                      {die.value}
-                      <small>{scanPct(die.confidence)}</small>
-                    </span>
-                  ))}
-                </div>
-                <p className="scanHint">
-                  {scanState.applied
-                    ? "Applied to your roll. Tap any die below to fix a miss."
-                    : scanState.result.complete
-                      ? "Looks usable, but confidence is lower. Apply it or retake."
-                      : "I need all six dice. Try a brighter, straight-down shot."}
-                </p>
-                {scanState.result.complete && !scanState.applied && (
-                  <button type="button" className="applyScanButton" onClick={() => applyScanResult(scanState.result)}>
-                    Apply detected dice
-                  </button>
-                )}
-              </>
-            )}
-
-            {scanState.status === "error" && (
-              <p className="scanHint">Could not read that image: {scanState.error}</p>
-            )}
+            <p className="scanHint">{scanHint}</p>
           </div>
         </section>
       )}
@@ -369,23 +426,55 @@ export default function PiddleAdvisor() {
       <section className="rollPanel" aria-label="Your roll">
         <div className="panelHead">
           <div>
-            <span className="eyebrow">Your roll</span>
-            <strong>{handName(move.handNow)}</strong>
+            <span className="eyebrow">{draftDirty ? "Draft roll" : "Saved roll"}</span>
+            <strong aria-live="polite">{draftHandLabel}</strong>
           </div>
-          <button type="button" className="ghostButton" onClick={newHand}>New hand</button>
+          <button type="button" className="ghostButton" onClick={clearDraftRoll}>New roll</button>
         </div>
 
         <div className="diceRow">
-          {dice.map((value, index) => (
+          {draftDice.map((value, index) => (
             <Die
               key={index}
               value={value}
-              held={holdFlags[index] && !solving}
-              muted={!holdFlags[index] && move.action !== "stop" && !solving}
-              onClick={() => cycle(index)}
-              label={`Die ${index + 1}, showing ${value}. Tap to change.`}
+              selected={activeSlot === index}
+              uncertain={uncertainSlots[index]}
+              held={!draftDirty && holdFlags[index] && !solving}
+              muted={!draftDirty && !holdFlags[index] && move.action !== "stop" && !solving}
+              onClick={() => selectSlot(index)}
+              label={value
+                ? `Slot ${index + 1}, showing ${value}. Tap to select.`
+                : `Slot ${index + 1}, empty. Tap to select.`}
             />
           ))}
+        </div>
+
+        <div className="keypad" aria-label="Dice value keypad">
+          {DIE_VALUES.map((value) => (
+            <button
+              key={value}
+              type="button"
+              className="keyButton"
+              onClick={() => fillSlot(value)}
+              aria-label={`Set selected slot to ${value}`}
+            >
+              <DieFace value={value} />
+            </button>
+          ))}
+        </div>
+
+        <div className="rollFooter">
+          <span className={draftDirty ? "rollStatus isDraft" : "rollStatus"}>
+            {draftDirty ? "Advice uses saved roll" : "Advice current"}
+          </span>
+          <button
+            type="button"
+            className="doneButton"
+            onClick={commitDraftRoll}
+            disabled={!draftComplete || (!draftDirty && !hasUncertainSlots)}
+          >
+            {doneLabel}
+          </button>
         </div>
       </section>
 
@@ -441,8 +530,19 @@ export default function PiddleAdvisor() {
       <section className={solving ? "movePanel isSolving" : "movePanel"} aria-label="Best move">
         <div className="moveTop">
           <span className="eyebrow">Best move</span>
-          <span className="modeChip">{modeLabel}</span>
+          <span className="modeChip">{adviceBasisLabel}</span>
         </div>
+
+        {draftDirty && (
+          <div className="savedRollStrip" aria-label="Saved roll used for advice">
+            <span>Saved roll</span>
+            <div className="miniDiceRow">
+              {dice.map((value, index) => (
+                <Die key={`${value}-${index}`} value={value} small />
+              ))}
+            </div>
+          </div>
+        )}
 
         <p className="moveText">{recommendationText(move, rollsLeft)}</p>
 
@@ -547,6 +647,7 @@ h1{
   background:${C.win};
 }
 .solveStatus.isBusy::before{background:${C.brass};box-shadow:0 0 0 3px rgba(201,145,47,.18);}
+.solveStatus.isDraft::before{background:${C.oxblood};}
 .scanButton{
   position:relative;
   display:inline-flex;
@@ -647,42 +748,11 @@ h1{
   font-size:13px;
   line-height:1.2;
 }
-.scanDice{
-  display:flex;
-  flex-wrap:wrap;
-  gap:5px;
-}
-.scanDice span{
-  min-width:34px;
-  min-height:34px;
-  display:grid;
-  place-items:center;
-  border-radius:8px;
-  border:1px solid rgba(245,238,223,.24);
-  background:${C.panel};
-  color:${C.ink};
-  font-size:16px;
-  font-weight:900;
-  line-height:1;
-}
-.scanDice small{
-  display:block;
-  margin-top:1px;
-  color:${C.muted};
-  font-size:8px;
-  font-weight:900;
-}
 .scanHint{
   margin:0;
   color:rgba(245,238,223,.72);
   font-size:12px;
   line-height:1.3;
-}
-.applyScanButton{
-  align-self:start;
-  background:${C.brass}!important;
-  border-color:${C.brass}!important;
-  color:${C.feltDark}!important;
 }
 .rollPanel,.controlsPanel,.movePanel{
   border-radius:8px;
@@ -691,6 +761,11 @@ h1{
   box-shadow:0 18px 36px rgba(0,0,0,.22);
 }
 .rollPanel{padding:14px 13px 15px;margin-bottom:10px;}
+.rollPanel .ghostButton{
+  border-color:${C.line};
+  background:${C.panelAlt};
+  color:${C.ink};
+}
 .panelHead{
   display:flex;
   align-items:flex-start;
@@ -720,6 +795,7 @@ h1{
   gap:7px;
 }
 .die{
+  position:relative;
   width:var(--die-size);
   height:var(--die-size);
   max-width:100%;
@@ -741,8 +817,46 @@ h1{
   border-color:${C.brass};
   box-shadow:0 0 0 3px rgba(201,145,47,.3),0 10px 18px rgba(20,19,15,.25);
 }
+.die.isSelected{
+  border-color:${C.oxblood};
+  box-shadow:0 0 0 3px rgba(169,74,50,.32),0 10px 18px rgba(20,19,15,.28);
+}
+.die.isUncertain::after{
+  content:"";
+  position:absolute;
+  top:5px;
+  right:5px;
+  width:7px;
+  height:7px;
+  border-radius:50%;
+  background:${C.oxblood};
+  box-shadow:0 0 0 2px ${C.die};
+}
+.die.isEmpty{
+  border-style:dashed;
+  background:rgba(255,248,233,.58);
+  box-shadow:inset 0 -5px 10px rgba(100,39,30,.06);
+}
 .die.isMuted{opacity:.46;}
 .die.isSmall{box-shadow:inset 0 -4px 8px rgba(100,39,30,.08);}
+.emptySlotMark{
+  width:12px;
+  height:12px;
+  border-radius:50%;
+  border:2px solid rgba(23,25,21,.32);
+}
+.dieFace{
+  --pip-size:7px;
+  width:42px;
+  height:42px;
+  display:grid;
+  place-items:center;
+  border-radius:8px;
+  border:1px solid #d9caa9;
+  background:${C.die};
+  color:${C.ink};
+  box-shadow:inset 0 -4px 8px rgba(100,39,30,.08);
+}
 .pipGrid{
   display:grid;
   grid-template-columns:repeat(3, var(--pip-size));
@@ -754,6 +868,57 @@ h1{
   border-radius:50%;
 }
 .pip.isOn{background:currentColor;}
+.keypad{
+  display:grid;
+  grid-template-columns:repeat(3, minmax(0, 1fr));
+  gap:8px;
+  margin-top:12px;
+}
+.keyButton{
+  min-height:56px;
+  display:grid;
+  place-items:center;
+  border-radius:8px;
+  border:1px solid ${C.line};
+  background:${C.panelAlt};
+  cursor:pointer;
+  transition:transform .14s ease, background .14s ease, border-color .14s ease;
+}
+.keyButton:active{transform:translateY(1px);}
+.keyButton:focus-visible,.die:focus-visible,.chip:focus-visible,.segButton:focus-visible,.primaryButton:focus-visible,.doneButton:focus-visible,.ghostButton:focus-visible,.scanButton:focus-within{
+  outline:3px solid rgba(201,145,47,.42);
+  outline-offset:2px;
+}
+.rollFooter{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  margin-top:12px;
+}
+.rollStatus{
+  min-width:0;
+  color:${C.muted};
+  font-size:12px;
+  font-weight:900;
+}
+.rollStatus.isDraft{color:${C.oxbloodDark};}
+.doneButton{
+  min-width:112px;
+  min-height:40px;
+  padding:0 14px;
+  border-radius:8px;
+  background:${C.oxblood};
+  color:${C.panel};
+  font-size:13px;
+  font-weight:900;
+  cursor:pointer;
+}
+.doneButton:disabled{
+  cursor:not-allowed;
+  background:#d9ccb3;
+  color:${C.muted};
+}
 .controlsPanel{padding:13px;margin-bottom:10px;}
 .targetBlock{margin-bottom:13px;}
 .targetRows{display:grid;gap:7px;margin-top:8px;}
@@ -784,6 +949,23 @@ h1{
 }
 .movePanel.isSolving{border-color:${C.brass};}
 .moveTop{display:flex;align-items:center;justify-content:space-between;gap:10px;}
+.savedRollStrip{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  margin-top:10px;
+  padding:8px 9px;
+  border:1px solid ${C.line};
+  border-radius:8px;
+  background:rgba(235,224,203,.62);
+}
+.savedRollStrip>span{
+  color:${C.muted};
+  font-size:11px;
+  font-weight:900;
+  white-space:nowrap;
+}
 .modeChip{
   min-height:24px;
   display:inline-flex;
